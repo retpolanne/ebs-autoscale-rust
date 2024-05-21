@@ -13,3 +13,6 @@ name = "ebs-autoscale-rust"
 
 [dependencies]
 aws-sdk-ec2 = "1.42.0"
+
+[dev-dependencies]
+cargo-deb = "2.2.0"

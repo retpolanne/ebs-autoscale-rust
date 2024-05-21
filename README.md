@@ -12,6 +12,8 @@ This is a draft of how E2E testing should work and what needs to be covered.
 
 1. Build this program and serve binary - automatically generate nightly releases for testing
 
+    Using [cargo-deb](https://crates.io/crates/cargo-deb).
+
 2. Ensure AWS credentials are set up on the testing environment and that permissions are set up for setup, teardown
 
 3. Ensure EC2 creation and deletion permissions are defined for testing machinery
