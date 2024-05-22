@@ -29,6 +29,8 @@ pub struct Config {
     pub mountpoint: String,
 
     pub limits: Limits,
+
+    pub fs_type: String,
 }
 
 impl Default for Config {
@@ -43,7 +45,8 @@ impl Default for Config {
                 max_ebs_volume_size: 1000,
                 max_logical_volume_size: 1000,
                 max_ebs_volume_count: 100
-            }
+            },
+            fs_type: "btrfs".to_string()
         }
     }
 }
@@ -71,6 +74,57 @@ impl Error for MaxEBSCountExceededError {
 impl fmt::Display for MaxEBSCountExceededError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "Maximum number of EBS volumes exceeded")
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct MaxLogicalVolumeSizeExceededError;
+
+impl Error for MaxLogicalVolumeSizeExceededError {
+
+}
+
+impl fmt::Display for MaxLogicalVolumeSizeExceededError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "Maximum EBS logic size exceeded")
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct GenericAWSError;
+
+impl Error for GenericAWSError {}
+
+impl fmt::Display for GenericAWSError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "Error calling AWS API")
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct GenericFSError;
+
+impl Error for GenericFSError {
+
+}
+
+impl fmt::Display for GenericFSError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "Error expanding filesystem")
+    }
+}
+
+pub trait FS {
+    fn expand_volume(&self, dev: String) -> Result<bool, Box<GenericFSError>>;
+}
+
+struct ConcreteFS {
+    fs_type: String
+}
+
+impl FS for ConcreteFS {
+    fn expand_volume(&self, dev: String) -> Result<bool, Box<GenericFSError>> {
+        Ok(true)
     }
 }
 
@@ -121,7 +175,8 @@ impl DiskMgr for ConcreteDiskMgr {
 }
 
 pub trait AWS {
-    fn request_ebs_volume(&mut self);
+    fn request_ebs_volume(&mut self, size: u64) -> Result<String, Box<GenericAWSError>>;
+    fn attach_ebs_volume(&mut self, device: String) -> Result<String, Box<GenericAWSError>>;
     fn get_attached_ebs_volumes(&mut self);
     fn delete_ebs_volume(&mut self);
 }
@@ -129,8 +184,11 @@ pub trait AWS {
 struct ConcreteAWS {}
 
 impl AWS for ConcreteAWS {
-    fn request_ebs_volume(&mut self) {
-
+    fn request_ebs_volume(&mut self, size: u64) -> Result<String, Box<GenericAWSError>> {
+        Ok("/dev/test".to_string())
+    }
+    fn attach_ebs_volume(&mut self, device: String) -> Result<String, Box<GenericAWSError>> {
+        Ok("/dev/test".to_string())
     }
     fn get_attached_ebs_volumes(&mut self) {
 
@@ -144,18 +202,21 @@ pub struct EBSManager {
     config: Config,
     diskmgr: Box<dyn DiskMgr>,
     aws: Box<dyn AWS>,
+    fs: Box<dyn FS>,
 }
 
 impl EBSManager {
     pub fn new(
         conf: Config,
         disks: Box<dyn DiskMgr>,
-        aws_cli: Box<dyn AWS>
+        aws_cli: Box<dyn AWS>,
+        fs_lib: Box<dyn FS>
     ) -> Box<EBSManager> {
         Box::new(Self {
             config: conf,
             diskmgr: disks,
-            aws: aws_cli
+            aws: aws_cli,
+            fs: fs_lib,
         })
     }
 
@@ -182,10 +243,23 @@ impl EBSManager {
         if dev_count >= self.config.limits.max_ebs_volume_count {
             return Err(Box::new(MaxEBSCountExceededError));
         }
-        let new_size = self.calc_new_size(dev_count);
-        let cur_size = self.diskmgr.disk_size(self.config.mountpoint.clone());
-        if
-        Ok(true)
+        let cur_size = self.diskmgr.disk_size(self.config.mountpoint.clone())?;
+        if cur_size >= self.config.limits.max_logical_volume_size.into() {
+           return Err(Box::new(MaxLogicalVolumeSizeExceededError));
+        }
+        let new_size = self.calc_new_size(dev_count).unwrap();
+        info!(
+            "Will extend volume {} by {}GB",
+            self.config.mountpoint.clone(),
+            new_size.clone()
+        );
+        Ok(self.aws.request_ebs_volume(new_size.into())
+            .and_then(|dev| self.aws.attach_ebs_volume(dev))
+            .and_then(
+                |dev|
+                self.fs.expand_volume(dev)
+                    .map_err(|_e| Box::new(GenericAWSError))
+            )?)
     }
 
     fn count_mounted_ebs_devices(&self) -> Option<u32> {
@@ -267,11 +341,22 @@ mod tests {
         }
     }
 
-    struct MockAWS {}
+    struct MockAWS {
+        simulate_aws_err: bool,
+    }
 
     impl AWS for MockAWS {
-        fn request_ebs_volume(&mut self) {
-
+        fn request_ebs_volume(&mut self, size: u64) -> Result<String, Box<GenericAWSError>>{
+            if self.simulate_aws_err {
+                return Err(Box::new(GenericAWSError))
+            }
+            Ok("/dev/test".to_string())
+        }
+        fn attach_ebs_volume(&mut self, device: String) -> Result<String, Box<GenericAWSError>>{
+            if self.simulate_aws_err {
+                return Err(Box::new(GenericAWSError))
+            }
+            Ok("/dev/test".to_string())
         }
         fn get_attached_ebs_volumes(&mut self) {
 
@@ -281,31 +366,50 @@ mod tests {
         }
     }
 
-    fn setup(mock_diskmgr: MockDiskMgr) -> Result<Context, Box<dyn Error>> {
+    struct MockFS {
+        simulate_fs_err: bool,
+    }
+
+    impl FS for MockFS {
+        fn expand_volume(&self, dev: String) -> Result<bool, Box<GenericFSError>> {
+            if self.simulate_fs_err {
+                return Err(Box::new(GenericFSError))
+            }
+            Ok(true)
+        }
+    }
+
+    fn setup(
+        mock_diskmgr: MockDiskMgr,
+        simulate_aws_err: bool,
+        simulate_fs_err: bool
+    ) -> Result<Context, Box<dyn Error>> {
         let config : Config = Figment::from(Serialized::defaults(Config::default()))
             .merge(Toml::file("Test.toml"))
             .extract()?;
         let mock_diskmgr : Box<dyn DiskMgr> = Box::new(mock_diskmgr);
-        let mock_aws = Box::new(MockAWS {});
+        let mock_aws = Box::new(MockAWS {simulate_aws_err});
+        let mock_fs = Box::new(MockFS {simulate_fs_err});
         Ok(Context {
             ebs_manager: EBSManager::new(
                 config,
                 mock_diskmgr,
-                mock_aws
+                mock_aws,
+                mock_fs
             ),
         })
     }
 
     #[test]
     fn test_power_on_self_test() -> Result<(), io::Error> {
-        let ctx = setup(MockDiskMgr::default()).unwrap();
+        let ctx = setup(MockDiskMgr::default(), false, false).unwrap();
         assert_eq!(ctx.ebs_manager.power_on_self_test()?, true);
         Ok(())
     }
 
     #[test]
     fn test_need_more_space_false() -> Result<(), Box<dyn Error>> {
-        let mut ctx = setup(MockDiskMgr::default()).unwrap();
+        let mut ctx = setup(MockDiskMgr::default(), false, false).unwrap();
         assert_eq!(ctx.ebs_manager.need_more_space()?, false);
         Ok(())
     }
@@ -316,42 +420,66 @@ mod tests {
             disks: vec!["test".to_string()],
             utilization_percentage: 95,
             total_disk_size: 100,
-        }).unwrap();
+        }, false, false).unwrap();
         assert_eq!(ctx.ebs_manager.need_more_space()?, true);
         Ok(())
     }
 
     #[test]
     fn test_add_more_space_max_ebs_count() -> Result<(), Box<dyn Error>> {
-        let mut ctx = setup(MockDiskMgr::default()).unwrap();
+        let mut ctx = setup(MockDiskMgr::default(), false, false).unwrap();
         assert!(ctx.ebs_manager.add_more_space(101).is_err());
         Ok(())
     }
 
     #[test]
     fn test_add_more_space_max_logical_size() -> Result<(), Box<dyn Error>> {
-        /// TODO
-        let mut ctx = setup(MockDiskMgr::default()).unwrap();
-        assert!(ctx.ebs_manager.add_more_space(101).is_err());
+        let mut ctx = setup(MockDiskMgr {
+            disks: vec!["test".to_string()],
+            utilization_percentage: 10,
+            total_disk_size: 1000,
+        }, false, false).unwrap();
+        assert!(ctx.ebs_manager.add_more_space(10).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn test_add_more_space_aws_err() -> Result<(), Box<dyn Error>> {
+        let mut ctx = setup(MockDiskMgr::default(), true, false).unwrap();
+        assert!(ctx.ebs_manager.add_more_space(1).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn test_add_more_space_logical_volume_err() -> Result<(), Box<dyn Error>> {
+        let mut ctx = setup(MockDiskMgr::default(), false, true).unwrap();
+        assert!(ctx.ebs_manager.add_more_space(10).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn test_add_more_space() -> Result<(), Box<dyn Error>> {
+        let mut ctx = setup(MockDiskMgr::default(), false, false).unwrap();
+        assert!(ctx.ebs_manager.add_more_space(10).is_ok());
         Ok(())
     }
 
     #[test]
     fn test_request_new_ebs_volume() -> Result<(), io::Error> {
-        let ctx = setup(MockDiskMgr::default()).unwrap();
+        let ctx = setup(MockDiskMgr::default(), false, false).unwrap();
         assert_eq!(ctx.ebs_manager.request_new_ebs_volume(32)?, true);
         Ok(())
     }
 
     #[test]
     fn test_count_mounted_ebs_devices() {
-        let ctx = setup(MockDiskMgr::default()).unwrap();
+        let ctx = setup(MockDiskMgr::default(), false, false).unwrap();
         assert_eq!(ctx.ebs_manager.count_mounted_ebs_devices(), Some(10));
     }
 
     #[test]
     fn test_calc_threshold() {
-        let ctx = setup(MockDiskMgr::default()).unwrap();
+        let ctx = setup(MockDiskMgr::default(), false, false).unwrap();
         assert_eq!(ctx.ebs_manager.calc_threshold(1),
                    Some(ctx.ebs_manager.config.limits.initial_utilization_threshold)
         );
@@ -366,19 +494,19 @@ mod tests {
 
     #[test]
     fn test_calc_new_size() {
-        let ctx = setup(MockDiskMgr::default()).unwrap();
+        let ctx = setup(MockDiskMgr::default(), false, false).unwrap();
         assert_eq!(ctx.ebs_manager.calc_new_size(10), Some(10));
     }
 
     #[test]
     fn test_get_next_logical_device() {
-        let ctx = setup(MockDiskMgr::default()).unwrap();
+        let ctx = setup(MockDiskMgr::default(), false, false).unwrap();
         assert_eq!(ctx.ebs_manager.get_next_logical_device(), Some("/dev/xvdb".to_string()));
     }
 
     #[test]
     fn test_extend_logical_device() -> Result<(), io::Error> {
-        let ctx = setup(MockDiskMgr::default()).unwrap();
+        let ctx = setup(MockDiskMgr::default(), false, false).unwrap();
         assert_eq!(ctx.ebs_manager.extend_logical_device()?, true);
         Ok(())
     }
