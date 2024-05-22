@@ -45,16 +45,38 @@ impl DiskMgr for ConcreteDiskMgr {
     }
 }
 
+pub trait AWS {
+    fn request_ebs_volume(&mut self);
+    fn get_attached_ebs_volumes(&mut self);
+    fn delete_ebs_volume(&mut self);
+}
+
+struct ConcreteAWS {}
+
+impl AWS for ConcreteAWS {
+    fn request_ebs_volume(&mut self) {
+
+    }
+    fn get_attached_ebs_volumes(&mut self) {
+
+    }
+    fn delete_ebs_volume(&mut self) {
+
+    }
+}
+
 pub struct EBSManager {
     config: Config,
     diskmgr: Box<dyn DiskMgr>,
+    aws: Box<dyn AWS>,
 }
 
 impl EBSManager {
-    pub fn new(conf: Config, disks: Box<dyn DiskMgr>) -> Box<EBSManager> {
+    pub fn new(conf: Config, disks: Box<dyn DiskMgr>, aws_cli: Box<dyn AWS>) -> Box<EBSManager> {
         Box::new(Self {
             config: conf,
             diskmgr: disks,
+            aws: aws_cli
         })
     }
 
@@ -131,13 +153,28 @@ mod tests {
         }
     }
 
+    struct MockAWS {}
+
+    impl AWS for MockAWS {
+        fn request_ebs_volume(&mut self) {
+
+        }
+        fn get_attached_ebs_volumes(&mut self) {
+
+        }
+        fn delete_ebs_volume(&mut self) {
+
+        }
+    }
+
     fn setup() -> Result<Context, Box<dyn Error>> {
         let config : Config = Figment::from(Serialized::defaults(Config::default()))
             .merge(Toml::file("Test.toml"))
             .extract()?;
         let mock_diskmgr = Box::new(MockDiskMgr {disks: vec!["test".to_string()]});
+        let mock_aws = Box::new(MockAWS {});
         Ok(Context {
-            ebs_manager: EBSManager::new(config, mock_diskmgr),
+            ebs_manager: EBSManager::new(config, mock_diskmgr, mock_aws),
         })
     }
 
