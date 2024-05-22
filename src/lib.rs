@@ -1,94 +1,153 @@
 use std::io;
+use std::error::Error;
 use log::{info, trace};
+use serde::{Deserialize, Serialize};
+use figment::{Figment, providers::{Format, Toml, Serialized}};
 
-pub fn need_more_space() -> Result<bool, io::Error> {
-    let dev_count = count_mounted_ebs_devices();
-    let threshold = calc_threshold(dev_count.unwrap());
-    let disk_utilization = get_disk_utilization();
+#[derive(Debug, Deserialize, Serialize)]
+pub struct Config {
+    /// Ensure that EBS volumes are deleted on termination
+    ///
+    /// By default, this is true. If you prefer to keep it safe, turn this config to false
+    pub ensure_ebs_deleted_on_term: bool,
+    /// Detection interval, in seconds
+    ///
+    /// Default: 2 seconds
+    pub detection_interval: u8,
+}
 
-    if disk_utilization >= threshold {
-        info!("Low disk space - adding more disks");
-        add_more_space(dev_count.unwrap())?;
+impl Default for Config {
+    fn default() -> Self {
+        Config {
+            ensure_ebs_deleted_on_term: true,
+            detection_interval: 2
+        }
     }
-    Ok(true)
 }
 
-pub fn add_more_space(dev_count: u32) -> Result<bool, io::Error> {
-    Ok(true)
+pub struct EBSManager {
+    config: Config,
 }
 
-fn count_mounted_ebs_devices() -> Option<u32> {
-    Some(10)
+impl EBSManager {
+    pub fn new(conf: Config) -> Result<Self, io::Error> {
+        Ok(Self{
+            config: conf,
+        })
+    }
+
+    pub fn need_more_space(&self) -> Result<bool, io::Error> {
+        let dev_count = self.count_mounted_ebs_devices();
+        let threshold = self.calc_threshold(dev_count.unwrap());
+        let disk_utilization = self.get_disk_utilization();
+
+        if disk_utilization >= threshold {
+            info!("Low disk space - adding more disks");
+            self.add_more_space(dev_count.unwrap())?;
+        }
+        Ok(true)
+    }
+
+    pub fn add_more_space(&self, dev_count: u32) -> Result<bool, io::Error> {
+        Ok(true)
+    }
+
+    fn count_mounted_ebs_devices(&self) -> Option<u32> {
+        Some(10)
+    }
+
+    fn calc_threshold(&self, dev_count: u32) -> Option<u32> {
+        Some(dev_count)
+    }
+
+    fn calc_new_size(&self, dev_count: u32) -> Option<u32> {
+        Some(10)
+    }
+
+    fn get_disk_utilization(&self) -> Option<u32> {
+        Some(10)
+    }
+
+    fn get_next_logical_device(&self) -> Option<String> {
+        Some("/dev/xvdb".to_string())
+    }
+
+    fn request_new_ebs_volume(&self, size: u32) -> Result<bool, io::Error> {
+        Ok(true)
+    }
+
+    fn extend_logical_device(&self) -> Result<bool, io::Error> {
+        Ok(true)
+    }
+
 }
 
-fn calc_threshold(dev_count: u32) -> Option<u32> {
-    Some(dev_count)
-}
-
-fn calc_new_size(dev_count: u32) -> Option<u32> {
-    Some(10)
-}
-
-fn get_disk_utilization() -> Option<u32> {
-    Some(10)
-}
-
-fn get_next_logical_device() -> Option<String> {
-    Some("/dev/xvdb".to_string())
-}
-
-fn request_new_ebs_volume(size: u32) -> Result<bool, io::Error> {
-    Ok(true)
-}
-
-fn extend_logical_device() -> Result<bool, io::Error> {
-    Ok(true)
-}
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    struct Context {
+        ebs_manager: EBSManager,
+    }
+
+    fn setup() -> Result<Context, Box<dyn Error>> {
+        let config : Config = Figment::from(Serialized::defaults(Config::default()))
+            .merge(Toml::file("Test.toml"))
+            .extract()?;
+        Ok(Context {
+            ebs_manager: EBSManager::new(config)?,
+        })
+    }
+
     #[test]
     fn test_need_more_space() -> Result<(), io::Error> {
-        assert_eq!(need_more_space()?, true);
+        let ctx = setup();
+        assert_eq!(ctx.unwrap().ebs_manager.need_more_space()?, true);
         Ok(())
     }
 
     #[test]
     fn test_request_new_ebs_volume() -> Result<(), io::Error> {
-        assert_eq!(request_new_ebs_volume(32)?, true);
+        let ctx = setup();
+        assert_eq!(ctx.unwrap().ebs_manager.request_new_ebs_volume(32)?, true);
         Ok(())
     }
 
     #[test]
     fn test_count_mounted_ebs_devices() {
-        assert_eq!(count_mounted_ebs_devices(), Some(10));
+        let ctx = setup();
+        assert_eq!(ctx.unwrap().ebs_manager.count_mounted_ebs_devices(), Some(10));
     }
 
     #[test]
     fn test_calc_threshold() {
-        assert_eq!(calc_threshold(10), Some(10));
+        let ctx = setup();
+        assert_eq!(ctx.unwrap().ebs_manager.calc_threshold(10), Some(10));
     }
 
     #[test]
     fn test_calc_new_size() {
-        assert_eq!(calc_new_size(10), Some(10));
+        let ctx = setup();
+        assert_eq!(ctx.unwrap().ebs_manager.calc_new_size(10), Some(10));
     }
 
     #[test]
     fn test_get_disk_utilization() {
-        assert_eq!(get_disk_utilization(), Some(10));
+        let ctx = setup();
+        assert_eq!(ctx.unwrap().ebs_manager.get_disk_utilization(), Some(10));
     }
 
     #[test]
     fn test_get_next_logical_device() {
-        assert_eq!(get_next_logical_device(), Some("/dev/xvdb".to_string()));
+        let ctx = setup();
+        assert_eq!(ctx.unwrap().ebs_manager.get_next_logical_device(), Some("/dev/xvdb".to_string()));
     }
 
     #[test]
     fn test_extend_logical_device() -> Result<(), io::Error> {
-        assert_eq!(extend_logical_device()?, true);
+        let ctx = setup();
+        assert_eq!(ctx.unwrap().ebs_manager.extend_logical_device()?, true);
         Ok(())
     }
 }
