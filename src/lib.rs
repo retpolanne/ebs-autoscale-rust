@@ -1,9 +1,10 @@
+use std::fmt;
 use std::io;
+use std::path::Path;
 use std::error::Error;
-use log::{info, trace};
+use log::info;
 use serde::{Deserialize, Serialize};
-use figment::{Figment, providers::{Format, Toml, Serialized}};
-use sysinfo::{Disks, Disk};
+use sysinfo::{Disks};
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct Config {
@@ -15,20 +16,38 @@ pub struct Config {
     ///
     /// Default: 2 seconds
     pub detection_interval: u8,
+
+    pub mountpoint : String
 }
 
 impl Default for Config {
     fn default() -> Self {
         Config {
             ensure_ebs_deleted_on_term: true,
-            detection_interval: 2
+            detection_interval: 2,
+            mountpoint: "/dev/xvdba".to_string()
         }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct MountPointNotFoundError;
+
+impl Error for MountPointNotFoundError {
+
+}
+
+impl fmt::Display for MountPointNotFoundError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "Could not find mount point")
     }
 }
 
 pub trait DiskMgr {
     fn new_disks(&mut self);
     fn save_disk_list(&mut self);
+    /// Returns the usage percentage for a mountpoint
+    fn disk_usage_percent(&mut self, mountpoint: String) -> Result<u32, MountPointNotFoundError>;
 }
 
 struct ConcreteDiskMgr {
@@ -42,6 +61,19 @@ impl DiskMgr for ConcreteDiskMgr {
 
     fn save_disk_list(&mut self) {
         self.disks.refresh_list();
+    }
+
+    fn disk_usage_percent(&mut self, mountpoint: String) -> Result<u32, MountPointNotFoundError> {
+        let mt_path = Path::new(&mountpoint);
+        for disk in self.disks.list() {
+            if disk.mount_point() == mt_path {
+                return Ok(
+                    (disk.total_space() / disk.available_space() * 100)
+                        .try_into().unwrap()
+                )
+            }
+        };
+        Err(MountPointNotFoundError)
     }
 }
 
@@ -72,7 +104,11 @@ pub struct EBSManager {
 }
 
 impl EBSManager {
-    pub fn new(conf: Config, disks: Box<dyn DiskMgr>, aws_cli: Box<dyn AWS>) -> Box<EBSManager> {
+    pub fn new(
+        conf: Config,
+        disks: Box<dyn DiskMgr>,
+        aws_cli: Box<dyn AWS>
+    ) -> Box<EBSManager> {
         Box::new(Self {
             config: conf,
             diskmgr: disks,
@@ -84,16 +120,19 @@ impl EBSManager {
         Ok(true)
     }
 
-    pub fn need_more_space(&self) -> Result<bool, io::Error> {
+    pub fn need_more_space(&mut self) -> Result<bool, Box<dyn Error>> {
         let dev_count = self.count_mounted_ebs_devices();
-        let threshold = self.calc_threshold(dev_count.unwrap());
-        let disk_utilization = self.get_disk_utilization();
+        let threshold = self.calc_threshold(dev_count.unwrap()).unwrap();
+        let disk_utilization = self.diskmgr.disk_usage_percent(
+            self.config.mountpoint.clone()
+        )?;
 
         if disk_utilization >= threshold {
             info!("Low disk space - adding more disks");
             self.add_more_space(dev_count.unwrap())?;
         }
         Ok(true)
+
     }
 
     pub fn add_more_space(&self, dev_count: u32) -> Result<bool, io::Error> {
@@ -109,10 +148,6 @@ impl EBSManager {
     }
 
     fn calc_new_size(&self, dev_count: u32) -> Option<u32> {
-        Some(10)
-    }
-
-    fn get_disk_utilization(&self) -> Option<u32> {
         Some(10)
     }
 
@@ -134,6 +169,7 @@ impl EBSManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use figment::{Figment, providers::{Format, Toml, Serialized}};
 
     struct Context {
         ebs_manager: Box<EBSManager>,
@@ -150,6 +186,10 @@ mod tests {
 
         fn save_disk_list(&mut self) {
             self.disks = vec!["test".to_string()];
+        }
+
+        fn disk_usage_percent(&mut self, mountpoint: String) -> Result<u32, MountPointNotFoundError> {
+            Ok(85)
         }
     }
 
@@ -171,10 +211,14 @@ mod tests {
         let config : Config = Figment::from(Serialized::defaults(Config::default()))
             .merge(Toml::file("Test.toml"))
             .extract()?;
-        let mock_diskmgr = Box::new(MockDiskMgr {disks: vec!["test".to_string()]});
+        let mock_diskmgr : Box<dyn DiskMgr> = Box::new(MockDiskMgr {disks: vec!["test".to_string()]});
         let mock_aws = Box::new(MockAWS {});
         Ok(Context {
-            ebs_manager: EBSManager::new(config, mock_diskmgr, mock_aws),
+            ebs_manager: EBSManager::new(
+                config,
+                mock_diskmgr,
+                mock_aws
+            ),
         })
     }
 
@@ -186,7 +230,7 @@ mod tests {
     }
 
     #[test]
-    fn test_need_more_space() -> Result<(), io::Error> {
+    fn test_need_more_space_false() -> Result<(), Box<dyn Error>> {
         let ctx = setup();
         assert_eq!(ctx.unwrap().ebs_manager.need_more_space()?, true);
         Ok(())
@@ -215,12 +259,6 @@ mod tests {
     fn test_calc_new_size() {
         let ctx = setup();
         assert_eq!(ctx.unwrap().ebs_manager.calc_new_size(10), Some(10));
-    }
-
-    #[test]
-    fn test_get_disk_utilization() {
-        let ctx = setup();
-        assert_eq!(ctx.unwrap().ebs_manager.get_disk_utilization(), Some(10));
     }
 
     #[test]
