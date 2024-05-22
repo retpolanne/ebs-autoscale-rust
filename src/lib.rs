@@ -3,6 +3,7 @@ use std::error::Error;
 use log::{info, trace};
 use serde::{Deserialize, Serialize};
 use figment::{Figment, providers::{Format, Toml, Serialized}};
+use sysinfo::{Disks, Disk};
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct Config {
@@ -25,15 +26,40 @@ impl Default for Config {
     }
 }
 
+pub trait DiskMgr {
+    fn new_disks(&mut self);
+    fn save_disk_list(&mut self);
+}
+
+struct ConcreteDiskMgr {
+    disks: Disks,
+}
+
+impl DiskMgr for ConcreteDiskMgr {
+    fn new_disks(&mut self) {
+        self.disks = Disks::new()
+    }
+
+    fn save_disk_list(&mut self) {
+        self.disks.refresh_list();
+    }
+}
+
 pub struct EBSManager {
     config: Config,
+    diskmgr: Box<dyn DiskMgr>,
 }
 
 impl EBSManager {
-    pub fn new(conf: Config) -> Result<Self, io::Error> {
-        Ok(Self{
+    pub fn new(conf: Config, disks: Box<dyn DiskMgr>) -> Box<EBSManager> {
+        Box::new(Self {
             config: conf,
+            diskmgr: disks,
         })
+    }
+
+    pub fn power_on_self_test(&self) -> Result<bool, io::Error> {
+        Ok(true)
     }
 
     pub fn need_more_space(&self) -> Result<bool, io::Error> {
@@ -88,16 +114,38 @@ mod tests {
     use super::*;
 
     struct Context {
-        ebs_manager: EBSManager,
+        ebs_manager: Box<EBSManager>,
+    }
+
+    struct MockDiskMgr {
+        disks: Vec<String>
+    }
+
+    impl DiskMgr for MockDiskMgr {
+        fn new_disks(&mut self) {
+            self.disks = Vec::new()
+        }
+
+        fn save_disk_list(&mut self) {
+            self.disks = vec!["test".to_string()];
+        }
     }
 
     fn setup() -> Result<Context, Box<dyn Error>> {
         let config : Config = Figment::from(Serialized::defaults(Config::default()))
             .merge(Toml::file("Test.toml"))
             .extract()?;
+        let mock_diskmgr = Box::new(MockDiskMgr {disks: vec!["test".to_string()]});
         Ok(Context {
-            ebs_manager: EBSManager::new(config)?,
+            ebs_manager: EBSManager::new(config, mock_diskmgr),
         })
+    }
+
+    #[test]
+    fn test_power_on_self_test() -> Result<(), io::Error> {
+        let ctx = setup();
+        assert_eq!(ctx.unwrap().ebs_manager.power_on_self_test()?, true);
+        Ok(())
     }
 
     #[test]
