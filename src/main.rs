@@ -10,7 +10,7 @@ use signal_hook::flag;
 use signal_hook::consts::TERM_SIGNALS;
 use signal_hook::iterator::SignalsInfo;
 use signal_hook::iterator::exfiltrator::WithOrigin;
-use ebs_autoscale_rust::Config;
+use ebs_autoscale_rust::config::Config;
 
 fn main() -> Result<(), Box<dyn Error>> {
     let figment = Figment::from(Serialized::defaults(Config::default()))

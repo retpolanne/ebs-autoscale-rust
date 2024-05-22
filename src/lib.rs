@@ -1,140 +1,22 @@
-use std::fmt;
+pub mod errors;
+pub mod config;
+mod fs;
+mod aws;
+mod disk;
+
 use std::io;
 use std::path::Path;
 use std::error::Error;
 use log::info;
-use serde::{Deserialize, Serialize};
 use sysinfo::Disks;
-
-#[derive(Debug, Deserialize, Serialize)]
-pub struct Limits {
-    initial_utilization_threshold: u32,
-    min_ebs_volume_size: u32,
-    max_ebs_volume_size: u32,
-    max_logical_volume_size: u32,
-    max_ebs_volume_count: u32
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-pub struct Config {
-    /// Ensure that EBS volumes are deleted on termination
-    ///
-    /// By default, this is true. If you prefer to keep it safe, turn this config to false
-    pub ensure_ebs_deleted_on_term: bool,
-    /// Detection interval, in seconds
-    ///
-    /// Default: 2 seconds
-    pub detection_interval: u8,
-
-    pub mountpoint: String,
-
-    pub limits: Limits,
-
-    pub fs_type: String,
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Config {
-            ensure_ebs_deleted_on_term: true,
-            detection_interval: 2,
-            mountpoint: "/dev/xvdba".to_string(),
-            limits: Limits {
-                initial_utilization_threshold: 80,
-                min_ebs_volume_size: 10,
-                max_ebs_volume_size: 1000,
-                max_logical_volume_size: 1000,
-                max_ebs_volume_count: 100
-            },
-            fs_type: "btrfs".to_string()
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct MountPointNotFoundError;
-
-impl Error for MountPointNotFoundError {
-
-}
-
-impl fmt::Display for MountPointNotFoundError {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "Could not find mount point")
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct MaxEBSCountExceededError;
-
-impl Error for MaxEBSCountExceededError {
-
-}
-
-impl fmt::Display for MaxEBSCountExceededError {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "Maximum number of EBS volumes exceeded")
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct MaxLogicalVolumeSizeExceededError;
-
-impl Error for MaxLogicalVolumeSizeExceededError {
-
-}
-
-impl fmt::Display for MaxLogicalVolumeSizeExceededError {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "Maximum EBS logic size exceeded")
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct GenericAWSError;
-
-impl Error for GenericAWSError {}
-
-impl fmt::Display for GenericAWSError {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "Error calling AWS API")
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct GenericFSError;
-
-impl Error for GenericFSError {
-
-}
-
-impl fmt::Display for GenericFSError {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "Error expanding filesystem")
-    }
-}
-
-pub trait FS {
-    fn expand_volume(&self, dev: String) -> Result<bool, Box<GenericFSError>>;
-}
-
-struct ConcreteFS {
-    fs_type: String
-}
-
-impl FS for ConcreteFS {
-    fn expand_volume(&self, dev: String) -> Result<bool, Box<GenericFSError>> {
-        Ok(true)
-    }
-}
 
 pub trait DiskMgr {
     fn new_disks(&mut self);
     fn save_disk_list(&mut self);
     /// Returns the usage percentage for a mountpoint
-    fn disk_usage_percent(&mut self, mountpoint: String) -> Result<u32, MountPointNotFoundError>;
+    fn disk_usage_percent(&mut self, mountpoint: String) -> Result<u32, errors::MountPointNotFoundError>;
     /// Total size for a mountpoint
-    fn disk_size(&mut self, mountpoint: String) -> Result<u64, MountPointNotFoundError>;
+    fn disk_size(&mut self, mountpoint: String) -> Result<u64, errors::MountPointNotFoundError>;
 }
 
 struct ConcreteDiskMgr {
@@ -150,7 +32,7 @@ impl DiskMgr for ConcreteDiskMgr {
         self.disks.refresh_list();
     }
 
-    fn disk_usage_percent(&mut self, mountpoint: String) -> Result<u32, MountPointNotFoundError> {
+    fn disk_usage_percent(&mut self, mountpoint: String) -> Result<u32, errors::MountPointNotFoundError> {
         let mt_path = Path::new(&mountpoint);
         for disk in self.disks.list() {
             if disk.mount_point() == mt_path {
@@ -160,23 +42,23 @@ impl DiskMgr for ConcreteDiskMgr {
                 )
             }
         };
-        Err(MountPointNotFoundError)
+        Err(errors::MountPointNotFoundError)
     }
 
-    fn disk_size(&mut self, mountpoint: String) -> Result<u64, MountPointNotFoundError> {
+    fn disk_size(&mut self, mountpoint: String) -> Result<u64, errors::MountPointNotFoundError> {
         let mt_path = Path::new(&mountpoint);
         for disk in self.disks.list() {
             if disk.mount_point() == mt_path {
                 return Ok(disk.total_space())
             }
         };
-        Err(MountPointNotFoundError)
+        Err(errors::MountPointNotFoundError)
     }
 }
 
 pub trait AWS {
-    fn request_ebs_volume(&mut self, size: u64) -> Result<String, Box<GenericAWSError>>;
-    fn attach_ebs_volume(&mut self, device: String) -> Result<String, Box<GenericAWSError>>;
+    fn request_ebs_volume(&mut self, size: u64) -> Result<String, Box<errors::GenericAWSError>>;
+    fn attach_ebs_volume(&mut self, device: String) -> Result<String, Box<errors::GenericAWSError>>;
     fn get_attached_ebs_volumes(&mut self);
     fn delete_ebs_volume(&mut self);
 }
@@ -184,10 +66,10 @@ pub trait AWS {
 struct ConcreteAWS {}
 
 impl AWS for ConcreteAWS {
-    fn request_ebs_volume(&mut self, size: u64) -> Result<String, Box<GenericAWSError>> {
+    fn request_ebs_volume(&mut self, size: u64) -> Result<String, Box<errors::GenericAWSError>> {
         Ok("/dev/test".to_string())
     }
-    fn attach_ebs_volume(&mut self, device: String) -> Result<String, Box<GenericAWSError>> {
+    fn attach_ebs_volume(&mut self, device: String) -> Result<String, Box<errors::GenericAWSError>> {
         Ok("/dev/test".to_string())
     }
     fn get_attached_ebs_volumes(&mut self) {
@@ -199,18 +81,18 @@ impl AWS for ConcreteAWS {
 }
 
 pub struct EBSManager {
-    config: Config,
+    config: config::Config,
     diskmgr: Box<dyn DiskMgr>,
     aws: Box<dyn AWS>,
-    fs: Box<dyn FS>,
+    fs: Box<dyn fs::FS>,
 }
 
 impl EBSManager {
     pub fn new(
-        conf: Config,
+        conf: config::Config,
         disks: Box<dyn DiskMgr>,
         aws_cli: Box<dyn AWS>,
-        fs_lib: Box<dyn FS>
+        fs_lib: Box<dyn fs::FS>
     ) -> Box<EBSManager> {
         Box::new(Self {
             config: conf,
@@ -241,11 +123,11 @@ impl EBSManager {
 
     pub fn add_more_space(&mut self, dev_count: u32) -> Result<bool, Box<dyn Error>> {
         if dev_count >= self.config.limits.max_ebs_volume_count {
-            return Err(Box::new(MaxEBSCountExceededError));
+            return Err(Box::new(errors::MaxEBSCountExceededError));
         }
         let cur_size = self.diskmgr.disk_size(self.config.mountpoint.clone())?;
         if cur_size >= self.config.limits.max_logical_volume_size.into() {
-           return Err(Box::new(MaxLogicalVolumeSizeExceededError));
+           return Err(Box::new(errors::MaxLogicalVolumeSizeExceededError));
         }
         let new_size = self.calc_new_size(dev_count).unwrap();
         info!(
@@ -258,7 +140,7 @@ impl EBSManager {
             .and_then(
                 |dev|
                 self.fs.expand_volume(dev)
-                    .map_err(|_e| Box::new(GenericAWSError))
+                    .map_err(|_e| Box::new(errors::GenericAWSError))
             )?)
     }
 
@@ -286,15 +168,6 @@ impl EBSManager {
     fn get_next_logical_device(&self) -> Option<String> {
         Some("/dev/xvdb".to_string())
     }
-
-    fn request_new_ebs_volume(&self, size: u32) -> Result<bool, io::Error> {
-        Ok(true)
-    }
-
-    fn extend_logical_device(&self) -> Result<bool, io::Error> {
-        Ok(true)
-    }
-
 }
 
 
@@ -332,11 +205,11 @@ mod tests {
             self.disks = vec!["test".to_string()];
         }
 
-        fn disk_usage_percent(&mut self, mountpoint: String) -> Result<u32, MountPointNotFoundError> {
+        fn disk_usage_percent(&mut self, mountpoint: String) -> Result<u32, errors::MountPointNotFoundError> {
             Ok(self.utilization_percentage)
         }
 
-        fn disk_size(&mut self, mountpoint: String) -> Result<u64, MountPointNotFoundError> {
+        fn disk_size(&mut self, mountpoint: String) -> Result<u64, errors::MountPointNotFoundError> {
             Ok(self.total_disk_size)
         }
     }
@@ -346,15 +219,15 @@ mod tests {
     }
 
     impl AWS for MockAWS {
-        fn request_ebs_volume(&mut self, size: u64) -> Result<String, Box<GenericAWSError>>{
+        fn request_ebs_volume(&mut self, _size: u64) -> Result<String, Box<errors::GenericAWSError>>{
             if self.simulate_aws_err {
-                return Err(Box::new(GenericAWSError))
+                return Err(Box::new(errors::GenericAWSError))
             }
             Ok("/dev/test".to_string())
         }
-        fn attach_ebs_volume(&mut self, device: String) -> Result<String, Box<GenericAWSError>>{
+        fn attach_ebs_volume(&mut self, _device: String) -> Result<String, Box<errors::GenericAWSError>>{
             if self.simulate_aws_err {
-                return Err(Box::new(GenericAWSError))
+                return Err(Box::new(errors::GenericAWSError))
             }
             Ok("/dev/test".to_string())
         }
@@ -366,30 +239,18 @@ mod tests {
         }
     }
 
-    struct MockFS {
-        simulate_fs_err: bool,
-    }
-
-    impl FS for MockFS {
-        fn expand_volume(&self, dev: String) -> Result<bool, Box<GenericFSError>> {
-            if self.simulate_fs_err {
-                return Err(Box::new(GenericFSError))
-            }
-            Ok(true)
-        }
-    }
 
     fn setup(
         mock_diskmgr: MockDiskMgr,
         simulate_aws_err: bool,
         simulate_fs_err: bool
     ) -> Result<Context, Box<dyn Error>> {
-        let config : Config = Figment::from(Serialized::defaults(Config::default()))
+        let config : config::Config = Figment::from(Serialized::defaults(config::Config::default()))
             .merge(Toml::file("Test.toml"))
             .extract()?;
         let mock_diskmgr : Box<dyn DiskMgr> = Box::new(mock_diskmgr);
         let mock_aws = Box::new(MockAWS {simulate_aws_err});
-        let mock_fs = Box::new(MockFS {simulate_fs_err});
+        let mock_fs = Box::new(fs::MockFS {simulate_fs_err});
         Ok(Context {
             ebs_manager: EBSManager::new(
                 config,
@@ -465,13 +326,6 @@ mod tests {
     }
 
     #[test]
-    fn test_request_new_ebs_volume() -> Result<(), io::Error> {
-        let ctx = setup(MockDiskMgr::default(), false, false).unwrap();
-        assert_eq!(ctx.ebs_manager.request_new_ebs_volume(32)?, true);
-        Ok(())
-    }
-
-    #[test]
     fn test_count_mounted_ebs_devices() {
         let ctx = setup(MockDiskMgr::default(), false, false).unwrap();
         assert_eq!(ctx.ebs_manager.count_mounted_ebs_devices(), Some(10));
@@ -502,12 +356,5 @@ mod tests {
     fn test_get_next_logical_device() {
         let ctx = setup(MockDiskMgr::default(), false, false).unwrap();
         assert_eq!(ctx.ebs_manager.get_next_logical_device(), Some("/dev/xvdb".to_string()));
-    }
-
-    #[test]
-    fn test_extend_logical_device() -> Result<(), io::Error> {
-        let ctx = setup(MockDiskMgr::default(), false, false).unwrap();
-        assert_eq!(ctx.ebs_manager.extend_logical_device()?, true);
-        Ok(())
     }
 }
