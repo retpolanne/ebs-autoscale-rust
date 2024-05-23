@@ -21,7 +21,7 @@ pub struct ConcreteFS {
 }
 
 impl FS for ConcreteFS {
-    fn expand_volume(&self, dev: String) -> Result<bool, Box<GenericFSError>> {
+    fn expand_volume(&self, _dev: String) -> Result<bool, Box<GenericFSError>> {
         Ok(true)
     }
 }
@@ -31,7 +31,7 @@ pub struct MockFS {
 }
 
 impl FS for MockFS {
-    fn expand_volume(&self, dev: String) -> Result<bool, Box<GenericFSError>> {
+    fn expand_volume(&self, _dev: String) -> Result<bool, Box<GenericFSError>> {
         if self.simulate_fs_err {
             return Err(Box::new(GenericFSError))
         }
