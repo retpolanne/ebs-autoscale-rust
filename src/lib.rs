@@ -58,8 +58,8 @@ impl EBSManager {
     }
 
     pub fn need_more_space(&mut self) -> Result<bool, Box<dyn Error>> {
-        let dev_count = self.count_mounted_ebs_devices();
-        let threshold = self.calc_threshold(dev_count.unwrap()).unwrap();
+        let dev_count = self.aws.count_mounted_ebs_volumes();
+        let threshold = self.calc_threshold(dev_count).unwrap();
         let disk_utilization = self.diskmgr.disk_usage_percent(
             self.config.mountpoint.clone()
         )?;
@@ -81,22 +81,51 @@ impl EBSManager {
            return Err(Box::new(MaxLogicalVolumeSizeExceededError));
         }
         let new_size = self.calc_new_size(dev_count).unwrap();
+        let created_volumes = self.aws.get_managed_ebs_volumes();
+        // TODO - check AWS payload to filter by this
+        // https://github.com/awslabs/amazon-ebs-autoscale/blob/8c8ac28914bf9302e4f5821ba99daac6e7fc05eb/bin/create-ebs-volume#L192
+        let attached_volumes_count = created_volumes
+            .filter(
+                |ebs_data|
+                ebs_data.as_ref()
+                        .map_or(false, true)
+            );
+        // TODO - same here
+        // https://github.com/awslabs/amazon-ebs-autoscale/blob/8c8ac28914bf9302e4f5821ba99daac6e7fc05eb/bin/create-ebs-volume#L223
+        // https://blog.malware.re/2022/12/23/Rust-filter-map/index.html
+        let total_created_volumes_size = created_volumes
+            .map();
+        if total_created_volumes_size >= self.config.limits.max_logical_volume_size {
+            return Err(Box::new(MaxLogicalVolumeSizeExceededError));
+        }
+        if attached_volumes_count >= self.config.limits.max_ebs_volume_count ||
+            created_volumes.len() >= self.config.limits.max_ebs_volume_count
+        {
+            return Err(Box::new(MaxEBSCountExceededError))
+        }
         info!(
             "Will extend volume {} by {}GB",
             self.config.mountpoint.clone(),
             new_size.clone()
         );
-        Ok(self.aws.request_ebs_volume(new_size.into())
+        Ok(self.aws.request_ebs_volume(
+            new_size.into(),
+            self.config.volume.vol_type,
+            self.config.volume.encrypted,
+            self.config.volume.throughput,
+        )
+            .and_then(
+                |_ret|
+                self.diskmgr.get_next_logical_device()
+                    .map_err(|_e| Box::new(aws::GenericAWSError))
+            )
             .and_then(|dev| self.aws.attach_ebs_volume(dev))
+            .and_then(|dev| self.aws.tag_as_delete_on_term(dev))
             .and_then(
                 |dev|
                 self.fs.expand_volume(dev)
                     .map_err(|_e| Box::new(aws::GenericAWSError))
             )?)
-    }
-
-    fn count_mounted_ebs_devices(&self) -> Option<u32> {
-        Some(10)
     }
 
     fn calc_threshold(&self, dev_count: u32) -> Option<u32> {
@@ -115,10 +144,6 @@ impl EBSManager {
     fn calc_new_size(&self, dev_count: u32) -> Option<u32> {
         Some(10)
     }
-
-    fn get_next_logical_device(&self) -> Option<String> {
-        Some("/dev/xvdb".to_string())
-    }
 }
 
 
@@ -134,15 +159,15 @@ mod tests {
 
     fn setup(
         mock_diskmgr: disk::MockDiskMgr,
-        simulate_aws_err: bool,
-        simulate_fs_err: bool
+        mock_aws: aws::MockAWS,
+        mock_fs: fs::MockFS,
     ) -> Result<Context, Box<dyn Error>> {
         let config : config::Config = Figment::from(Serialized::defaults(config::Config::default()))
             .merge(Toml::file("Test.toml"))
             .extract()?;
         let mock_diskmgr : Box<dyn disk::DiskMgr> = Box::new(mock_diskmgr);
-        let mock_aws = Box::new(aws::MockAWS {simulate_aws_err});
-        let mock_fs = Box::new(fs::MockFS {simulate_fs_err});
+        let mock_aws = Box::new(mock_aws);
+        let mock_fs = Box::new(mock_fs);
         Ok(Context {
             ebs_manager: EBSManager::new(
                 config,
@@ -155,14 +180,22 @@ mod tests {
 
     #[test]
     fn test_power_on_self_test() -> Result<(), io::Error> {
-        let ctx = setup(disk::MockDiskMgr::default(), false, false).unwrap();
+        let mut ctx = setup(
+            disk::MockDiskMgr::default(),
+            aws::MockAWS::default(),
+            fs::MockFS::default()
+        ).unwrap();
         assert_eq!(ctx.ebs_manager.power_on_self_test()?, true);
         Ok(())
     }
 
     #[test]
     fn test_need_more_space_false() -> Result<(), Box<dyn Error>> {
-        let mut ctx = setup(disk::MockDiskMgr::default(), false, false).unwrap();
+        let mut ctx = setup(
+            disk::MockDiskMgr::default(),
+            aws::MockAWS::default(),
+            fs::MockFS::default()
+        ).unwrap();
         assert_eq!(ctx.ebs_manager.need_more_space()?, false);
         Ok(())
     }
@@ -173,14 +206,31 @@ mod tests {
             disks: vec!["test".to_string()],
             utilization_percentage: 95,
             total_disk_size: 100,
-        }, false, false).unwrap();
+            sim_no_more_device_names: false,
+        }, aws::MockAWS::default(), fs::MockFS::default()).unwrap();
         assert_eq!(ctx.ebs_manager.need_more_space()?, true);
         Ok(())
     }
 
     #[test]
+    fn test_add_more_space_no_available_dev_name() -> Result<(), Box<dyn Error>> {
+        let mut ctx = setup(disk::MockDiskMgr {
+            disks: vec!["test".to_string()],
+            utilization_percentage: 95,
+            total_disk_size: 100,
+            sim_no_more_device_names: true,
+        }, aws::MockAWS::default(), fs::MockFS::default()).unwrap();
+        assert!(ctx.ebs_manager.add_more_space(101).is_err());
+        Ok(())
+    }
+
+    #[test]
     fn test_add_more_space_max_ebs_count() -> Result<(), Box<dyn Error>> {
-        let mut ctx = setup(disk::MockDiskMgr::default(), false, false).unwrap();
+        let mut ctx = setup(
+            disk::MockDiskMgr::default(),
+            aws::MockAWS::default(),
+            fs::MockFS::default()
+        ).unwrap();
         assert!(ctx.ebs_manager.add_more_space(101).is_err());
         Ok(())
     }
@@ -191,41 +241,57 @@ mod tests {
             disks: vec!["test".to_string()],
             utilization_percentage: 10,
             total_disk_size: 1000,
-        }, false, false).unwrap();
+            sim_no_more_device_names: false,
+        }, aws::MockAWS::default(), fs::MockFS::default()).unwrap();
         assert!(ctx.ebs_manager.add_more_space(10).is_err());
         Ok(())
     }
 
     #[test]
     fn test_add_more_space_aws_err() -> Result<(), Box<dyn Error>> {
-        let mut ctx = setup(disk::MockDiskMgr::default(), true, false).unwrap();
+        let mut ctx = setup(
+            disk::MockDiskMgr::default(),
+            aws::MockAWS {
+                simulate_aws_err: true,
+                mounted_devices_count: 1
+            },
+            fs::MockFS::default()
+        ).unwrap();
         assert!(ctx.ebs_manager.add_more_space(1).is_err());
         Ok(())
     }
 
     #[test]
     fn test_add_more_space_logical_volume_err() -> Result<(), Box<dyn Error>> {
-        let mut ctx = setup(disk::MockDiskMgr::default(), false, true).unwrap();
+        let mut ctx = setup(
+            disk::MockDiskMgr::default(),
+            aws::MockAWS::default(),
+            fs::MockFS {
+                simulate_fs_err: true
+            }
+        ).unwrap();
         assert!(ctx.ebs_manager.add_more_space(10).is_err());
         Ok(())
     }
 
     #[test]
     fn test_add_more_space() -> Result<(), Box<dyn Error>> {
-        let mut ctx = setup(disk::MockDiskMgr::default(), false, false).unwrap();
+        let mut ctx = setup(
+            disk::MockDiskMgr::default(),
+            aws::MockAWS::default(),
+            fs::MockFS::default()
+        ).unwrap();
         assert!(ctx.ebs_manager.add_more_space(10).is_ok());
         Ok(())
     }
 
     #[test]
-    fn test_count_mounted_ebs_devices() {
-        let ctx = setup(disk::MockDiskMgr::default(), false, false).unwrap();
-        assert_eq!(ctx.ebs_manager.count_mounted_ebs_devices(), Some(10));
-    }
-
-    #[test]
     fn test_calc_threshold() {
-        let ctx = setup(disk::MockDiskMgr::default(), false, false).unwrap();
+        let mut ctx = setup(
+            disk::MockDiskMgr::default(),
+            aws::MockAWS::default(),
+            fs::MockFS::default()
+        ).unwrap();
         assert_eq!(ctx.ebs_manager.calc_threshold(1),
                    Some(ctx.ebs_manager.config.limits.initial_utilization_threshold)
         );
@@ -240,13 +306,21 @@ mod tests {
 
     #[test]
     fn test_calc_new_size() {
-        let ctx = setup(disk::MockDiskMgr::default(), false, false).unwrap();
-        assert_eq!(ctx.ebs_manager.calc_new_size(10), Some(10));
-    }
-
-    #[test]
-    fn test_get_next_logical_device() {
-        let ctx = setup(disk::MockDiskMgr::default(), false, false).unwrap();
-        assert_eq!(ctx.ebs_manager.get_next_logical_device(), Some("/dev/xvdb".to_string()));
+        // TODO https://github.com/awslabs/amazon-ebs-autoscale/blob/8c8ac28914bf9302e4f5821ba99daac6e7fc05eb/bin/ebs-autoscale#L123
+        let mut ctx = setup(
+            disk::MockDiskMgr::default(),
+            aws::MockAWS::default(),
+            fs::MockFS::default()
+        ).unwrap();
+        assert_eq!(ctx.ebs_manager.calc_new_size(1),
+                   Some(ctx.ebs_manager.config.limits.initial_utilization_threshold)
+        );
+        for dev_count in [4, 5, 6] {
+            assert_eq!(ctx.ebs_manager.calc_new_size(dev_count), Some(80));
+        }
+        for dev_count in [7, 8, 9, 10] {
+            assert_eq!(ctx.ebs_manager.calc_new_size(dev_count), Some(90));
+        }
+        assert_eq!(ctx.ebs_manager.calc_new_size(11), Some(90));
     }
 }

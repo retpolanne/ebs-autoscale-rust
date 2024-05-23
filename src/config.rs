@@ -10,6 +10,13 @@ pub struct Limits {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
+pub struct Volume {
+    pub vol_type: String,
+    pub encrypted: bool,
+    pub throughput: u64,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
 pub struct Config {
     /// Ensure that EBS volumes are deleted on termination
     ///
@@ -25,6 +32,8 @@ pub struct Config {
     pub limits: Limits,
 
     pub fs_type: String,
+
+    pub volume: Volume,
 }
 
 impl Default for Config {
@@ -39,6 +48,11 @@ impl Default for Config {
                 max_ebs_volume_size: 1000,
                 max_logical_volume_size: 1000,
                 max_ebs_volume_count: 100
+            },
+            volume: Volume {
+                vol_type: "gp3".to_string(),
+                encrypted: true,
+                throughput: 1000,
             },
             fs_type: "btrfs".to_string()
         }

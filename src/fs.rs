@@ -30,6 +30,14 @@ pub struct MockFS {
     pub simulate_fs_err: bool,
 }
 
+impl Default for MockFS {
+    fn default() -> Self {
+        MockFS {
+            simulate_fs_err: false,
+        }
+    }
+}
+
 impl FS for MockFS {
     fn expand_volume(&self, _dev: String) -> Result<bool, Box<GenericFSError>> {
         if self.simulate_fs_err {
