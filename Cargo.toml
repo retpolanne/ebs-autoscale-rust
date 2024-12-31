@@ -22,3 +22,7 @@ sysinfo = "0.30.12"
 
 [dev-dependencies]
 cargo-deb = "2.2.0"
+
+[package.metadata.db]
+maintainer = "Anne Isabelle Macedo <annie@retpolanne.com>"
+copyright = "2024, Anne Isabelle Macedo <annie@retpolanne.com>"

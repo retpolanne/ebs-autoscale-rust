@@ -84,7 +84,7 @@ impl EBSManager {
         let created_volumes = self.aws.get_managed_ebs_volumes();
         // TODO - check AWS payload to filter by this
         // https://github.com/awslabs/amazon-ebs-autoscale/blob/8c8ac28914bf9302e4f5821ba99daac6e7fc05eb/bin/create-ebs-volume#L192
-        let attached_volumes_count = created_volumes
+        /*let attached_volumes_count = created_volumes
             .filter(
                 |ebs_data|
                 ebs_data.as_ref()
@@ -102,7 +102,7 @@ impl EBSManager {
             created_volumes.len() >= self.config.limits.max_ebs_volume_count
         {
             return Err(Box::new(MaxEBSCountExceededError))
-        }
+        }*/
         info!(
             "Will extend volume {} by {}GB",
             self.config.mountpoint.clone(),
@@ -110,9 +110,9 @@ impl EBSManager {
         );
         Ok(self.aws.request_ebs_volume(
             new_size.into(),
-            self.config.volume.vol_type,
-            self.config.volume.encrypted,
-            self.config.volume.throughput,
+            self.config.volume.vol_type.clone(),
+            self.config.volume.encrypted.clone(),
+            self.config.volume.throughput.clone(),
         )
             .and_then(
                 |_ret|
